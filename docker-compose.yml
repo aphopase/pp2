@@ -1,0 +1,12 @@
+services:
+  industrial-iot:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      IOT_DB_PATH: /data/industrial_iot.db
+      IOT_BILLING_SIGNING_SECRET: ${IOT_BILLING_SIGNING_SECRET:-local-development-secret}
+    volumes:
+      - iot-data:/data
+volumes:
+  iot-data:

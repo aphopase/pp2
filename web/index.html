@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Any Sensor. Any Protocol. Any Site.</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; margin: 2rem auto; max-width: 1100px; color: #17202a; }
+    header { display: flex; justify-content: space-between; align-items: center; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+    .card { border: 1px solid #d5dbe0; border-radius: 8px; padding: 1rem; }
+    .metric { font-size: 2rem; font-weight: 700; }
+    .alert { border-left: 5px solid #c0392b; margin: .5rem 0; padding: .6rem; background: #fff5f4; }
+    button { cursor: pointer; padding: .45rem .7rem; }
+    table { width: 100%; border-collapse: collapse; } th, td { text-align: left; border-bottom: 1px solid #eee; padding: .5rem; }
+    #error { color: #a93226; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>ANY SENSOR. ANY PROTOCOL. ANY SITE.</h1>
+      <p>ONE INTELLIGENT PLATFORM.</p>
+    </div>
+    <button id="refresh">Refresh</button>
+  </header>
+  <p>Tenant: <strong id="tenant">org_demo</strong> · Site: <strong>site_demo</strong></p>
+  <p id="error"></p>
+  <section class="grid">
+    <div class="card"><div>Telemetry records</div><div class="metric" id="telemetry-count">—</div></div>
+    <div class="card"><div>Active alerts</div><div class="metric" id="alert-count">—</div></div>
+    <div class="card"><div>Latest power</div><div class="metric" id="latest-power">—</div></div>
+  </section>
+  <section class="card"><h2>Active alerts</h2><div id="alerts">Loading…</div></section>
+  <section class="card">
+    <h2>Reference calibration plugin</h2>
+    <p>Development workflow: calculate a safe offset, approve it, then apply it.</p>
+    <label>Device <input id="cal-device" value="motor_01"></label>
+    <label>Observed °C <input id="cal-observed" type="number" value="23.5" step="0.1"></label>
+    <label>Reference °C <input id="cal-reference" type="number" value="25" step="0.1"></label>
+    <button id="cal-propose">Create proposal</button>
+    <div id="calibration">No calibration proposal yet.</div>
+  </section>
+  <section class="card">
+    <h2>Modbus dry-run preview</h2>
+    <p>This uses the documented simulated register map. No hardware write is performed.</p>
+    <label>Device <input id="modbus-device" value="modbus_sensor_1"></label>
+    <label>Reference °C <input id="modbus-reference" type="number" value="25" step="0.1"></label>
+    <button id="modbus-preview">Preview register write</button>
+    <div id="modbus-result">No Modbus preview yet.</div>
+  </section>
+  <section class="card">
+    <h2>Calibration campaign simulator</h2>
+    <p>Coordinate up to 1,000 simulated sensors with bounded parallel workers. This phase performs no physical writes.</p>
+    <label>Sensors <input id="campaign-count" type="number" min="1" max="1000" value="1000"></label>
+    <label>Reference °C <input id="campaign-reference" type="number" value="25" step="0.1"></label>
+    <label>Failure IDs <input id="campaign-failures" placeholder="sensor_0003,sensor_0007"></label>
+    <button id="campaign-create">Create campaign</button>
+    <button id="campaign-start" disabled>Start proposals</button>
+    <button id="campaign-approve" disabled>Approve proposals</button>
+    <button id="campaign-apply" disabled>Apply approved (simulation)</button>
+    <button id="campaign-refresh" disabled>Refresh campaign</button>
+    <div id="campaign-status">No campaign yet.</div>
+    <table><thead><tr><th>Sensor</th><th>Observed</th><th>Offset</th><th>Status</th><th>Error</th></tr></thead><tbody id="campaign-attempts"></tbody></table>
+  </section>
+  <section class="card"><h2>Recent telemetry</h2><table><thead><tr><th>Device</th><th>Measurement</th><th>Value</th><th>Event time</th></tr></thead><tbody id="telemetry"></tbody></table></section>
+  <script>
+    const tenant = 'org_demo';
+    const headers = {'X-Tenant-ID': tenant};
+    async function get(path) {
+      const response = await fetch(`http://127.0.0.1:8080${path}`, {headers});
+      if (!response.ok) throw new Error(await response.text());
+      return response.json();
+    }
+    async function refresh() {
+      try {
+        const [telemetry, alerts] = await Promise.all([get('/v1/telemetry'), get('/v1/alerts')]);
+        document.querySelector('#telemetry-count').textContent = telemetry.items.length;
+        document.querySelector('#alert-count').textContent = alerts.items.length;
+        const power = telemetry.items.filter(x => x.measurement === 'power').slice(-1)[0];
+        document.querySelector('#latest-power').textContent = power ? `${power.value} ${power.unit}` : '—';
+        document.querySelector('#alerts').innerHTML = alerts.items.length ? alerts.items.map(a => `<div class="alert"><strong>${a.device_id}</strong>: ${a.measurement} = ${a.value} (${a.severity}) <button onclick="ack('${a.alert_id}')">Acknowledge</button></div>`).join('') : 'No active alerts.';
+        document.querySelector('#telemetry').innerHTML = telemetry.items.slice(-20).reverse().map(x => `<tr><td>${x.device_id}</td><td>${x.measurement}</td><td>${x.value} ${x.unit}</td><td>${x.event_time}</td></tr>`).join('');
+        document.querySelector('#error').textContent = '';
+      } catch (error) { document.querySelector('#error').textContent = `API error: ${error.message}`; }
+    }
+    async function ack(id) { await fetch(`http://127.0.0.1:8080/v1/alerts/${encodeURIComponent(id)}/acknowledge`, {method: 'POST', headers}); await refresh(); }
+    async function calibrationPost(path, body) {
+      const response = await fetch(`http://127.0.0.1:8080${path}`, {method: 'POST', headers: {...headers, 'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+      if (!response.ok) throw new Error(await response.text());
+      return response.json();
+    }
+    function showCalibration(proposal) {
+      document.querySelector('#calibration').innerHTML = `<p>Status: <strong>${proposal.status}</strong> · Offset: ${proposal.offset} ${proposal.unit}</p><p>Observed: ${proposal.observed_value} · Reference: ${proposal.reference_value}</p><button ${proposal.status !== 'proposed' ? 'disabled' : ''} onclick="approveCalibration('${proposal.proposal_id}')">Approve</button><button ${proposal.status !== 'approved' ? 'disabled' : ''} onclick="applyCalibration('${proposal.proposal_id}')">Apply</button>`;
+    }
+    async function approveCalibration(id) { const result = await calibrationPost(`/v1/calibrations/${encodeURIComponent(id)}/approve`, {actor: 'browser_operator'}); showCalibration(result.proposal); }
+    async function applyCalibration(id) { const result = await calibrationPost(`/v1/calibrations/${encodeURIComponent(id)}/apply`, {}); showCalibration(result.proposal); }
+    function showModbusPreview(result) {
+      const proposal = result.proposal;
+      const plan = result.write_plan;
+      document.querySelector('#modbus-result').innerHTML = `<p><strong>No hardware write performed.</strong></p><dl><dt>Slave ID</dt><dd>${plan.slave_id}</dd><dt>Measurement register</dt><dd>100</dd><dt>Calibration register</dt><dd>${plan.register}</dd><dt>Decoded measurement</dt><dd>${proposal.observed_value} ${proposal.unit}</dd><dt>Reference</dt><dd>${proposal.reference_value} ${proposal.unit}</dd><dt>Offset</dt><dd>${proposal.offset} ${proposal.unit}</dd><dt>Original calibration value</dt><dd>${plan.original_raw_value}</dd><dt>Proposed calibration value</dt><dd>${plan.proposed_raw_value}</dd></dl>`;
+    }
+    document.querySelector('#cal-propose').addEventListener('click', async () => {
+      try {
+        const result = await calibrationPost('/v1/calibrations', {device_id: document.querySelector('#cal-device').value, observed_value: Number(document.querySelector('#cal-observed').value), reference_value: Number(document.querySelector('#cal-reference').value), unit: 'degC'});
+        showCalibration(result.proposal);
+      } catch (error) { document.querySelector('#calibration').textContent = error.message; }
+    });
+    document.querySelector('#modbus-preview').addEventListener('click', async () => {
+      try {
+        const result = await calibrationPost('/v1/calibrations/modbus/preview', {device_id: document.querySelector('#modbus-device').value, reference_value: Number(document.querySelector('#modbus-reference').value)});
+        showModbusPreview(result);
+      } catch (error) { document.querySelector('#modbus-result').textContent = error.message; }
+    });
+    let campaignId = null;
+    async function campaignAction(path, body = {}) { return calibrationPost(path, body); }
+    function showCampaign(summary) {
+      const counts = summary.counts || {};
+      document.querySelector('#campaign-status').textContent = `Campaign ${summary.campaign_id}: ${summary.status} · ${summary.completed}/${summary.sensor_count} completed · proposed ${counts.proposed || 0} · approved ${counts.approved || 0} · verified ${counts.verified || 0} · failed ${counts.failed || 0}`;
+      document.querySelector('#campaign-start').disabled = !campaignId || !['created', 'failed'].includes(summary.status);
+      document.querySelector('#campaign-approve').disabled = !campaignId || !['proposed'].includes(summary.status);
+      document.querySelector('#campaign-apply').disabled = !campaignId || summary.status !== 'approved';
+      document.querySelector('#campaign-refresh').disabled = !campaignId;
+    }
+    async function refreshCampaign() {
+      if (!campaignId) return;
+      const summary = await campaignAction(`/v1/calibration-campaigns/${encodeURIComponent(campaignId)}`);
+      showCampaign(summary);
+      const attempts = await campaignAction(`/v1/calibration-campaigns/${encodeURIComponent(campaignId)}/attempts`);
+      document.querySelector('#campaign-attempts').innerHTML = attempts.items.slice(0, 100).map(x => `<tr><td>${x.sensor_id}</td><td>${x.observed_value ?? '—'}</td><td>${x.offset ?? '—'}</td><td>${x.status}</td><td>${x.error ?? ''}</td></tr>`).join('');
+    }
+    document.querySelector('#campaign-create').addEventListener('click', async () => {
+      try {
+        const failureText = document.querySelector('#campaign-failures').value.trim();
+        const result = await campaignAction('/v1/calibration-campaigns', {sensor_count: Number(document.querySelector('#campaign-count').value), reference_value: Number(document.querySelector('#campaign-reference').value), unit: 'degC', failure_ids: failureText ? failureText.split(',').map(x => x.trim()) : []});
+        campaignId = result.campaign_id;
+        showCampaign(result);
+        await refreshCampaign();
+      } catch (error) { document.querySelector('#campaign-status').textContent = error.message; }
+    });
+    for (const [id, action] of [['campaign-start', 'start'], ['campaign-approve', 'approve'], ['campaign-apply', 'apply']]) {
+      document.querySelector(`#${id}`).addEventListener('click', async () => {
+        try { showCampaign(await campaignAction(`/v1/calibration-campaigns/${encodeURIComponent(campaignId)}/${action}`)); await refreshCampaign(); }
+        catch (error) { document.querySelector('#campaign-status').textContent = error.message; }
+      });
+    }
+    document.querySelector('#campaign-refresh').addEventListener('click', refreshCampaign);
+    document.querySelector('#refresh').addEventListener('click', refresh);
+    refresh();
+  </script>
+</body>
+</html>
